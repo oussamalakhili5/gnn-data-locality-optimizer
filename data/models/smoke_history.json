@@ -1,0 +1,81 @@
+{
+  "best_epoch": 1,
+  "best_val_metrics": {
+    "accuracy": 0.697986577181208,
+    "balanced_accuracy": 0.5,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "positive_rate": 0.30201342281879195,
+    "tn": 312.0,
+    "fp": 0.0,
+    "fn": 135.0,
+    "tp": 0.0,
+    "roc_auc": 0.4869183285849952,
+    "average_precision": 0.2892327049235108,
+    "loss": 0.6538878679275513
+  },
+  "test_metrics": {
+    "accuracy": 0.6986607142857143,
+    "balanced_accuracy": 0.5,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "positive_rate": 0.3013392857142857,
+    "tn": 313.0,
+    "fp": 0.0,
+    "fn": 135.0,
+    "tp": 0.0,
+    "roc_auc": 0.5072654123772335,
+    "average_precision": 0.29736340180407433,
+    "loss": 0.65364009141922
+  },
+  "checkpoint_path": "data\\models\\smoke_model.pt",
+  "history_path": "data\\models\\smoke_history.json",
+  "history": {
+    "epoch": [
+      1.0,
+      2.0
+    ],
+    "train_loss": [
+      0.7016641497612,
+      0.6965306997299194
+    ],
+    "val_loss": [
+      0.6538878679275513,
+      0.6556091904640198
+    ],
+    "train_accuracy": [
+      0.6965484180249281,
+      0.6864813039309684
+    ],
+    "val_accuracy": [
+      0.697986577181208,
+      0.697986577181208
+    ],
+    "train_precision": [
+      0.14285714285714285,
+      0.22916666666666666
+    ],
+    "val_precision": [
+      0.0,
+      0.0
+    ],
+    "train_recall": [
+      0.0015923566878980893,
+      0.01751592356687898
+    ],
+    "val_recall": [
+      0.0,
+      0.0
+    ],
+    "train_f1": [
+      0.0031496062992125984,
+      0.03254437869822485
+    ],
+    "val_f1": [
+      0.0,
+      0.0
+    ]
+  }
+}

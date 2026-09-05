@@ -24,7 +24,8 @@ class DistributedSystemGenerator:
         num_datanodes: int = 50,
         num_blocks: int = 1000,
         num_jobs: int = 500,
-        random_seed: int = 42
+        random_seed: int = 42,
+        locality_threshold: float = 0.7,
     ):
         """
         Initialise le générateur avec les paramètres du cluster.
@@ -39,6 +40,9 @@ class DistributedSystemGenerator:
         self.num_blocks = num_blocks
         self.num_jobs = num_jobs
         self.random_seed = random_seed
+        if not 0.0 <= locality_threshold <= 1.0:
+            raise ValueError("locality_threshold must be between 0 and 1")
+        self.locality_threshold = locality_threshold
         
         np.random.seed(random_seed)
         logger.info(f"✅ Générateur initialisé avec seed={random_seed}")
@@ -142,6 +146,94 @@ class DistributedSystemGenerator:
         
         logger.info(f"✅ {n} Jobs générés")
         return jobs
+
+    @staticmethod
+    def _normalize(values: np.ndarray) -> np.ndarray:
+        """
+        Normalize numeric values to the [0, 1] range.
+
+        Args:
+            values: Numeric array to normalize.
+
+        Returns:
+            Normalized NumPy array. Constant arrays are mapped to zeros.
+        """
+        values = np.asarray(values, dtype=float)
+        min_value = np.nanmin(values)
+        max_value = np.nanmax(values)
+
+        if np.isclose(max_value, min_value):
+            return np.zeros_like(values, dtype=float)
+
+        return (values - min_value) / (max_value - min_value)
+
+    def _compute_datanode_quality(self, datanodes: pd.DataFrame) -> np.ndarray:
+        """
+        Compute a quality score for each DataNode from model-visible features.
+
+        High-quality nodes have more capacity, more bandwidth, lower CPU and
+        memory pressure, and lower network latency.
+
+        Args:
+            datanodes: DataFrame containing DataNode features.
+
+        Returns:
+            Array of quality scores in the [0, 1] range.
+        """
+        capacity_score = self._normalize(datanodes['capacity_tb'].values)
+        bandwidth_score = self._normalize(np.log1p(datanodes['bandwidth_gbps'].values))
+        latency_score = 1.0 - self._normalize(np.log1p(datanodes['network_latency_ms'].values))
+        cpu_availability = 1.0 - datanodes['cpu_usage'].clip(0.0, 1.0).values
+        memory_availability = 1.0 - datanodes['memory_usage'].clip(0.0, 1.0).values
+
+        quality_score = (
+            0.25 * capacity_score
+            + 0.25 * bandwidth_score
+            + 0.20 * latency_score
+            + 0.15 * cpu_availability
+            + 0.15 * memory_availability
+        )
+
+        return np.clip(quality_score, 0.0, 1.0)
+
+    def _compute_block_demand(
+        self,
+        blocks: pd.DataFrame,
+        access_patterns: pd.DataFrame
+    ) -> np.ndarray:
+        """
+        Compute a demand score for each block from model-visible signals.
+
+        Popular and frequently accessed blocks should be placed on better
+        DataNodes because poor placement creates more remote transfers.
+
+        Args:
+            blocks: DataFrame containing block features.
+            access_patterns: DataFrame containing Job-to-Block accesses.
+
+        Returns:
+            Array of demand scores in the [0, 1] range.
+        """
+        block_ids = blocks['block_id'].values
+        access_count_by_block = access_patterns.groupby('block_id')['access_count'].sum()
+        transfer_by_block = access_patterns.groupby('block_id')['data_transferred_mb'].sum()
+
+        access_counts = access_count_by_block.reindex(block_ids).fillna(0).values
+        transferred_mb = transfer_by_block.reindex(block_ids).fillna(0.0).values
+
+        popularity_score = self._normalize(np.log1p(blocks['popularity_score'].values))
+        access_frequency_score = self._normalize(blocks['access_frequency'].values)
+        observed_access_score = self._normalize(np.log1p(access_counts))
+        transfer_score = self._normalize(np.log1p(transferred_mb))
+
+        demand_score = (
+            0.40 * popularity_score
+            + 0.30 * access_frequency_score
+            + 0.20 * observed_access_score
+            + 0.10 * transfer_score
+        )
+
+        return np.clip(demand_score, 0.0, 1.0)
     
     def generate_access_patterns(self, blocks: pd.DataFrame, jobs: pd.DataFrame) -> pd.DataFrame:
         """
@@ -194,12 +286,23 @@ class DistributedSystemGenerator:
         logger.info(f"✅ {len(access_df)} relations d'accès générées")
         return access_df
     
-    def generate_placements(self, blocks: pd.DataFrame) -> pd.DataFrame:
+    def generate_placements(
+        self,
+        blocks: pd.DataFrame,
+        datanodes: pd.DataFrame,
+        access_patterns: pd.DataFrame
+    ) -> pd.DataFrame:
         """
         Génère le placement initial des blocs sur les DataNodes.
+
+        Labels are generated from a learnable placement policy instead of a
+        random Bernoulli draw. A placement is local/good when its DataNode
+        quality is in the top locality quantile for that block.
         
         Args:
             blocks: DataFrame des blocks
+            datanodes: DataFrame des DataNodes
+            access_patterns: DataFrame des patterns d'accès
             
         Returns:
             DataFrame avec les placements Block → DataNode
@@ -207,19 +310,90 @@ class DistributedSystemGenerator:
         logger.info("🔄 Génération des placements initiaux...")
         
         placements = []
-        
-        for _, block in blocks.iterrows():
+        datanode_quality = self._compute_datanode_quality(datanodes)
+        block_demand = self._compute_block_demand(blocks, access_patterns)
+        node_ids = datanodes['node_id'].values.astype(int)
+        node_capacity_score = self._normalize(datanodes['capacity_tb'].values)
+        node_bandwidth_score = self._normalize(np.log1p(datanodes['bandwidth_gbps'].values))
+        block_size_score = self._normalize(blocks['size_mb'].values)
+
+        for block_position, block in blocks.reset_index(drop=True).iterrows():
+            demand = float(block_demand[block_position])
+            size_pressure = float(block_size_score[block_position])
+
+            # Hot blocks require a smaller pool of high-quality DataNodes.
+            good_pool_fraction = float(np.clip(0.55 - 0.35 * demand, 0.18, 0.55))
+            good_pool_size = int(np.clip(
+                round(self.num_datanodes * good_pool_fraction),
+                3,
+                max(3, self.num_datanodes - 3)
+            ))
+
+            capacity_fit = 1.0 - np.maximum(0.0, size_pressure - node_capacity_score)
+            compatibility = (
+                0.70 * datanode_quality
+                + 0.20 * capacity_fit
+                + 0.10 * node_bandwidth_score
+            )
+            locality_cutoff = np.quantile(
+                compatibility,
+                self.locality_threshold,
+            )
+
+            ranked_nodes = np.argsort(compatibility)
+            good_nodes = ranked_nodes[-good_pool_size:]
+            bad_nodes = ranked_nodes[:-good_pool_size]
+            selected_nodes = set()
+
             for replica in range(block['replication_factor']):
+                target_local_probability = 0.30 + 0.45 * demand
+                should_choose_local = np.random.random() < target_local_probability
+                candidate_pool = good_nodes if should_choose_local else bad_nodes
+                fallback_pool = bad_nodes if should_choose_local else good_nodes
+
+                available_candidates = [
+                    int(node_idx)
+                    for node_idx in candidate_pool
+                    if int(node_idx) not in selected_nodes
+                ]
+                if not available_candidates:
+                    available_candidates = [
+                        int(node_idx)
+                        for node_idx in fallback_pool
+                        if int(node_idx) not in selected_nodes
+                    ]
+                if not available_candidates:
+                    available_candidates = [
+                        int(node_idx)
+                        for node_idx in range(self.num_datanodes)
+                    ]
+
+                if should_choose_local:
+                    weights = compatibility[available_candidates] + 1e-6
+                else:
+                    weights = (1.0 - compatibility[available_candidates]) + 1e-6
+                weights = weights / weights.sum()
+
+                datanode_index = int(np.random.choice(available_candidates, p=weights))
+                selected_nodes.add(datanode_index)
+                is_local = compatibility[datanode_index] >= locality_cutoff
+
                 placements.append({
                     'block_id': block['block_id'],
-                    'datanode_id': np.random.randint(0, self.num_datanodes),
+                    'datanode_id': int(node_ids[datanode_index]),
                     'replica_id': replica,
-                    # 30% de localité initiale (placement aléatoire)
-                    'is_local': np.random.random() < 0.3,
+                    'locality_score': float(compatibility[datanode_index]),
+                    'block_demand_score': demand,
+                    'is_local': bool(is_local),
                 })
         
         placements_df = pd.DataFrame(placements)
         logger.info(f"✅ {len(placements_df)} placements générés")
+        logger.info(
+            "✅ Locality labels: %.1f%% local, %.1f%% remote",
+            100.0 * placements_df['is_local'].mean(),
+            100.0 * (1.0 - placements_df['is_local'].mean())
+        )
         return placements_df
     
     def generate_full_dataset(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -235,7 +409,7 @@ class DistributedSystemGenerator:
         blocks = self.generate_blocks()
         jobs = self.generate_jobs()
         access_patterns = self.generate_access_patterns(blocks, jobs)
-        placements = self.generate_placements(blocks)
+        placements = self.generate_placements(blocks, datanodes, access_patterns)
         
         logger.info("✅ Dataset complet généré avec succès !")
         logger.info(f"   - {len(datanodes)} DataNodes")

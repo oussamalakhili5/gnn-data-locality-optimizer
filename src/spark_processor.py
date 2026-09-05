@@ -56,14 +56,16 @@ class SparkProcessor:
         self.hdfs_port = hdfs_port
         self.data_dir = data_dir
 
+        # Create the Spark session
         builder = SparkSession.builder.appName(app_name)
         if master:
             builder = builder.master(master)
 
-        # For HDFS in Docker, use hostname instead of internal IP
-        builder = builder.config("spark.hadoop.fs.defaultFS", "hdfs://localhost:9000")
-        builder = builder.config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
-        builder = builder.config("spark.hadoop.dfs.datanode.use.datanode.hostname", "true")
+        # HDFS-specific configuration only when reading from HDFS
+        if hdfs_enabled:
+            builder = builder.config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
+            builder = builder.config("spark.hadoop.dfs.datanode.use.datanode.hostname", "true")
+
         self.spark = builder.getOrCreate()
 
         logger.info("Spark session created (master=%s)", master or "local[*]")

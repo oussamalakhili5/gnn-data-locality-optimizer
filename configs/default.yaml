@@ -1,0 +1,57 @@
+# ============================================
+# GLOBAL PROJECT CONFIGURATION
+# ============================================
+project:
+  name: "GNN Data Locality Optimizer"
+  version: "1.0.0"
+  author: "Oussama Lakhili"
+
+# ============================================
+# DATA GENERATION
+# ============================================
+data:
+  num_datanodes: 50
+  num_blocks: 1000
+  num_jobs: 500
+  random_seed: 42
+  zipf_exponent: 1.5
+  replication_factors: [2, 3, 4]
+  replication_probs: [0.2, 0.6, 0.2]
+  locality_threshold: 0.7
+
+# ============================================
+# GRAPH CONSTRUCTION
+# ============================================
+graph:
+  data_dir: "data/raw"
+  graph_path: "data/graphs/graph.pt"
+
+# ============================================
+# MODEL HYPERPARAMETERS
+# ============================================
+model:
+  hidden_channels: 64
+  num_layers: 3
+  dropout: 0.3
+  conv_type: "sage"
+
+# ============================================
+# TRAINING
+# ============================================
+training:
+  learning_rate: 0.001
+  weight_decay: 0.0005
+  epochs: 200
+  patience: 20
+  train_ratio: 0.70
+  val_ratio: 0.15
+  class_weighting: true
+  checkpoint_path: "data/models/best_model.pt"
+  history_path: "data/models/training_history.json"
+
+# ============================================
+# EVALUATION
+# ============================================
+evaluation:
+  output_dir: "results/figures"
+  device: "auto"
